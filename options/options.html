@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Google News Summaries - Options</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="options.css">
+  <link rel="icon" type="image/png" sizes="32x32" href="../src/assets/logo-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="../src/assets/logo-16.png">
+</head>
+<body>
+  <main class="container">
+    <div class="brand">
+      <img id="logo" src="../src/assets/logo-32.png" alt="Google News Summaries logo" width="32" height="32">
+      <h1>Google News Summaries</h1>
+    </div>
+    <p class="subtitle">Configure your AI provider and model used to summarize articles.</p>
+
+    <form id="options-form">
+      <div class="field">
+        <label for="provider">Provider</label>
+        <select id="provider" name="provider">
+          <option value="openai">OpenAI</option>
+        </select>
+        <small>Additional providers can be added later.</small>
+      </div>
+
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" name="model" type="text" placeholder="e.g. gpt-5-nano" required>
+        <small>Enter the exact model name supported by your provider.</small>
+      </div>
+
+      <div class="field">
+        <label for="systemPrompt">System Prompt</label>
+        <textarea id="systemPrompt" name="systemPrompt" rows="4" placeholder="You are a news summarizer.\n- Return exactly one concise sentence (max 25 words).\n- No emojis, no quotes, no markdown.\n- Be factual and neutral."></textarea>
+        <small>Customize the instructions for the AI. Default is recommended for best results.</small>
+      </div>
+
+      <div class="field">
+        <label for="apiKey">API Key</label>
+        <input id="apiKey" name="apiKey" type="password" placeholder="sk-..." autocomplete="off">
+        <small>Your key is stored locally in this browser (extension storage). Paste plain text (no smart quotes or ellipses). <a href="https://platform.openai.com/account/api-keys" target="_blank" rel="noopener noreferrer">Get your OpenAI API key</a></small>
+      </div>
+
+      <div class="field checkbox">
+        <input id="deepFetch" name="deepFetch" type="checkbox">
+        <label for="deepFetch">Deep fetch article content (better summaries, more network access)</label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="saveBtn" class="primary">Save</button>
+        <button type="button" id="testBtn" class="secondary">Test settings</button>
+      </div>
+
+      <div id="status" role="status" aria-live="polite"></div>
+      <pre id="testResult" class="test-result" hidden></pre>
+    </form>
+
+    <footer>
+      <p class="muted">
+        Note: This extension adds a small summarize button next to Google News article cards. Summaries are generated on-demand when you click.
+      </p>
+    </footer>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>

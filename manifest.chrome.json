@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Google News Summaries",
+  "version": "1.0.0",
+  "description": "Summarizes Google News articles using AI.",
+  "icons": {
+    "16": "src/assets/logo-16.png",
+    "32": "src/assets/logo-32.png",
+    "48": "src/assets/logo-48.png",
+    "128": "src/assets/logo-128.png",
+    "256": "src/assets/logo-256.png"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://news.google.com/*"],
+      "js": ["src/contentScript.js"],
+      "css": ["src/styles.css"]
+    }
+  ],
+  "options_page": "options/options.html",
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://news.google.com/*",
+    "https://api.openai.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "src/assets/logo-16.png",
+      "32": "src/assets/logo-32.png",
+      "48": "src/assets/logo-48.png",
+      "128": "src/assets/logo-128.png",
+      "256": "src/assets/logo-256.png"
+    }
+  }
+}

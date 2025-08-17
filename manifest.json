@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Google News Summaries",
+  "version": "0.1.0",
+  "description": "Adds a summarize icon to Google News articles to generate one-line summaries using AI.",
+  "icons": {
+    "16": "src/assets/logo-16.png",
+    "32": "src/assets/logo-32.png",
+    "48": "src/assets/logo-48.png",
+    "128": "src/assets/logo-128.png",
+    "256": "src/assets/logo-256.png"
+  },
+  "permissions": ["storage", "scripting"],
+  "host_permissions": [
+    "https://news.google.com/*",
+    "https://api.openai.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://news.google.com/*"],
+      "js": ["src/contentScript.js"],
+      "css": ["src/styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Google News Summaries",
+    "default_icon": {
+      "16": "src/assets/logo-16.png",
+      "32": "src/assets/logo-32.png",
+      "48": "src/assets/logo-48.png",
+      "128": "src/assets/logo-128.png",
+      "256": "src/assets/logo-256.png"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "gns@local",
+      "strict_min_version": "109.0"
+    }
+  }
+}
