@@ -13,10 +13,14 @@ const DEFAULT_SETTINGS = {
   systemPrompt: `You are a news summarizer.\n- Return exactly one concise sentence (max 25 words).\n- No emojis, no quotes, no markdown.\n- Be factual and neutral.\n-- If the article speaks about a list, for example a list of books or games, mention it in a bullet point list format. Use identations or format as needed.`
 };
  
- 
+
 async function getSettings() {
+  console.log('[GNS] Getting settings from storage...');
   const stored = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
-  return { ...DEFAULT_SETTINGS, ...stored };
+  console.log('[GNS] Raw stored settings:', stored);
+  const settings = { ...DEFAULT_SETTINGS, ...stored };
+  console.log('[GNS] Merged settings:', { ...settings, apiKey: settings.apiKey ? '[set]' : '[empty]' });
+  return settings;
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -97,7 +101,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function fetchHtml(url) {
   // Try default fetch first
   try {
-    const res = await fetch(url, {
+  const res = await fetch(url, {
       redirect: 'follow',
       headers: {
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -109,12 +113,12 @@ async function fetchHtml(url) {
     // Some publishers require a referrer; retry with a Google News referrer
     try {
       const res2 = await fetch(url, {
-        redirect: 'follow',
+    redirect: 'follow',
         referrer: 'https://news.google.com/',
-        headers: {
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-        }
-      });
+    headers: {
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    }
+  });
       if (!res2.ok) throw new Error(`Fetch failed (${res2.status})`);
       return await res2.text();
     } catch (e2) {
@@ -161,56 +165,195 @@ async function probeExternalRedirect(url) {
  * Tries a DOM-based main-content extraction first; falls back to htmlToText.
  */
 async function extractTextFromUrl(url) {
-  // Helper to parse HTML into main article text if possible
-  const tryParse = (html) => {
-    const main = extractMainText(html);
-    if (main && main.length >= 400) return main;
-    return htmlToText(html);
-  };
-
-  // If the read URL issues an immediate redirect to the publisher, use that target
-  const probe = await probeExternalRedirect(url).catch(() => '');
-  if (probe && isLikelyArticleUrl(probe)) {
-    try {
-      const htmlProbe = await fetchHtml(probe);
-      return tryParse(htmlProbe);
-    } catch { /* fall through */ }
-  }
-
-  let html = await fetchHtml(url);
   try {
-    const u = new URL(url);
-    const isGNews = /(^|\.)news\.google\.com$/i.test(u.hostname);
-    if (isGNews) {
-      // Try common redirect hints from the Google News "read" page
-      const candidates = [];
-      const metaUrl = extractMetaRefreshUrl(html);
-      if (metaUrl) candidates.push(metaUrl);
-      const canonicalUrl = extractCanonicalUrl(html);
-      if (canonicalUrl) candidates.push(canonicalUrl);
-      const ogUrl = extractOgUrl(html);
-      if (ogUrl) candidates.push(ogUrl);
-      const ampUrl = extractAmpUrl(html);
-      if (ampUrl) candidates.push(ampUrl);
-      const externalHref = extractExternalUrlFromGoogleNews(html);
-      if (externalHref) candidates.push(externalHref);
+    console.log('[GNS] Processing URL:', url);
+    
+    if (url.includes('news.google.com')) {
+      console.log('[GNS] Processing Google News URL, following redirects to get final article URL');
+      
+      // Use content script to follow the redirect by opening a tab
+      const finalUrl = await followGoogleNewsRedirectWithTab(url);
+      
+      if (finalUrl && finalUrl !== url) {
+        console.log('[GNS] Successfully followed redirect to:', finalUrl);
+        return await extractTextFromUrl(finalUrl);
+      } else {
+        console.log('[GNS] No redirect found, extracting from Google News page');
+        return await extractTextFromGoogleNewsPage(url);
+      }
+    }
+    
+    return await extractTextFromRegularUrl(url);
+  } catch (error) {
+    console.error('[GNS] Error extracting text from URL:', error);
+    return null;
+  }
+}
 
-      // Pick the first candidate that isn't a Google domain
-      const disallow = /(news\.google\.com|google\.[^\/]+|gstatic\.com|googleusercontent\.com|googleapis\.com)/i;
-      const target = candidates.find(h => h && !disallow.test(h));
-
-      if (target) {
+async function followGoogleNewsRedirectWithTab(googleNewsUrl) {
+  try {
+    console.log('[GNS] Following Google News redirect using tab approach');
+    
+    // Create a new tab with the Google News URL
+    const newTab = await chrome.tabs.create({
+      url: googleNewsUrl,
+      active: false // Open in background
+    });
+    
+    // Wait for the page to load and potentially redirect
+    return new Promise((resolve) => {
+      const checkTab = async () => {
         try {
-          html = await fetchHtml(target);
-        } catch (e) {
-          console.warn('[GNS] Failed to fetch external article, using Google News page text instead:', e && e.message ? e.message : e);
+          const tab = await chrome.tabs.get(newTab.id);
+          
+          // Check if the URL has changed (redirect happened)
+          if (tab.url && tab.url !== googleNewsUrl && !tab.url.includes('news.google.com')) {
+            console.log('[GNS] Redirect detected to:', tab.url);
+            
+            // Close the tab and return the final URL
+            await chrome.tabs.remove(newTab.id);
+            resolve(tab.url);
+            return;
+          }
+          
+          // If still loading, wait a bit more
+          if (tab.status === 'loading') {
+            setTimeout(checkTab, 500);
+            return;
+          }
+          
+          // If loaded but still on Google News, wait a bit more for potential redirect
+          if (tab.status === 'complete') {
+            setTimeout(() => {
+              chrome.tabs.get(newTab.id).then(finalTab => {
+                if (finalTab.url && finalTab.url !== googleNewsUrl && !finalTab.url.includes('news.google.com')) {
+                  console.log('[GNS] Final redirect detected to:', finalTab.url);
+                  chrome.tabs.remove(newTab.id);
+                  resolve(finalTab.url);
+                } else {
+                  console.log('[GNS] No redirect detected, staying on Google News');
+                  chrome.tabs.remove(newTab.id);
+                  resolve(null);
+                }
+              });
+            }, 3000); // Wait 3 seconds for potential redirect
+            return;
+          }
+          
+        } catch (error) {
+          console.error('[GNS] Error checking tab:', error);
+          chrome.tabs.remove(newTab.id);
+          resolve(null);
+        }
+      };
+      
+      // Start checking after 1 second
+      setTimeout(checkTab, 1000);
+    });
+    
+  } catch (error) {
+    console.error('[GNS] Error following Google News redirect with tab:', error);
+    return null;
+  }
+}
+
+async function extractExternalUrlFromGoogleNewsPage(html) {
+  try {
+    console.log('[GNS] Extracting external URLs from Google News page content');
+    
+    // Look for any URLs that don't contain google.com
+    const urlPatterns = [
+      // Any URL pattern that doesn't contain google.com
+      /(https?:\/\/[^\s"']+)/gi
+    ];
+    
+    const foundUrls = new Set();
+    
+    for (const pattern of urlPatterns) {
+      let match;
+      while ((match = pattern.exec(html)) !== null) {
+        const url = match[1] || match[0];
+        if (url && isValidExternalUrl(url)) {
+          foundUrls.add(url);
         }
       }
     }
-  } catch {
-    // ignore URL parse errors; just proceed with htmlToText
+    
+    console.log('[GNS] Found', foundUrls.size, 'potential external URLs');
+    
+    // Filter to find article-like URLs from any domain
+    const validUrls = Array.from(foundUrls).filter(url => {
+      try {
+        const urlObj = new URL(url);
+        const host = urlObj.hostname.toLowerCase();
+        
+        // Skip Google domains
+        if (host.includes('google.com') || host.includes('gstatic.com') || 
+            host.includes('googleusercontent.com') || host.includes('cdn.ampproject.org')) {
+          return false;
+        }
+        
+        // Skip common non-article domains
+        const skipDomains = ['w3.org', 'schema.org', 'ogp.me', 'fonts.googleapis.com', 
+                           'google-analytics.com', 'googletagmanager.com', 'angular.dev'];
+        if (skipDomains.some(domain => host.includes(domain))) {
+          return false;
+        }
+        
+        // Accept any URL with substantial path (likely an article)
+        const path = urlObj.pathname;
+        if (path.length > 15) {
+          console.log('[GNS] Found URL with substantial path:', url);
+          return true;
+        }
+        
+        return false;
+      } catch (e) {
+        return false;
+      }
+    });
+    
+    if (validUrls.length > 0) {
+      console.log('[GNS] Returning best external URL:', validUrls[0]);
+      return validUrls[0];
+    }
+    
+    console.log('[GNS] No valid external URLs found');
+    return null;
+  } catch (error) {
+    console.error('[GNS] Error extracting external URL from Google News page:', error);
+    return null;
   }
-  return tryParse(html);
+}
+
+function isValidExternalUrl(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+  } catch (e) {
+    return false;
+  }
+}
+
+async function extractTextFromGoogleNewsPage(url) {
+  try {
+    console.log('[GNS] Extracting content from Google News page');
+    
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+    
+    const html = await response.text();
+    console.log('[GNS] Successfully extracted content from Google News page, length:', html.length);
+    
+    // Try to extract meaningful content from the Google News page
+    return await tryParse(html);
+  } catch (error) {
+    console.error('[GNS] Error extracting from Google News page:', error);
+    throw error;
+  }
 }
 
 /**
@@ -218,24 +361,592 @@ async function extractTextFromUrl(url) {
  */
 function extractExternalUrlFromGoogleNews(html) {
   if (!html || typeof html !== 'string') return '';
-  // Collect all absolute hrefs
+  
+  console.log('[GNS] Extracting external URLs from Google News HTML');
+  
+  // Define blacklists once to ensure consistency
+  const blacklistedHosts = [
+    // Technical specifications and standards
+    'w3.org', 'schema.org', 'ogp.me', 'opengraphprotocol.org', 'xml.org', 'ietf.org', 'rfc-editor.org',
+    'whatwg.org', 'ecma-international.org', 'iso.org', 'ansi.org', 'ieee.org',
+    
+    // Documentation and developer resources
+    'developer.mozilla.org', 'docs.microsoft.com', 'developers.google.com', 'github.com', 'gitlab.com',
+    'stackoverflow.com', 'stackexchange.com', 'reddit.com', 'hackernews.com',
+    
+    // Framework and technology documentation
+    'angular.dev', 'angular.io', 'react.dev', 'reactjs.org', 'vuejs.org', 'svelte.dev', 'nextjs.org',
+    'nuxtjs.org', 'gatsbyjs.com', 'webpack.js.org', 'babeljs.io', 'eslint.org', 'prettier.io',
+    'typescript.org', 'nodejs.org', 'npmjs.com', 'yarnpkg.com', 'deno.land', 'bun.sh',
+    
+    // Social media and platforms
+    'facebook.com', 'twitter.com', 'x.com', 'instagram.com', 'linkedin.com', 'youtube.com',
+    'tiktok.com', 'snapchat.com', 'pinterest.com', 'tumblr.com',
+    
+    // CDNs and infrastructure
+    'cdn.jsdelivr.net', 'unpkg.com', 'jsdelivr.net', 'cdnjs.cloudflare.com', 'bootcdn.net',
+    'cdn.staticfile.org', 'lib.baomitu.com', 'cdn.bootcss.com',
+    
+    // Analytics and tracking
+    'google-analytics.com', 'googletagmanager.com', 'doubleclick.net', 'facebook.net',
+    'scorecardresearch.com', 'adservice.google.com', 'googlesyndication.com',
+    
+    // Browser and system
+    'chrome.google.com', 'addons.mozilla.org', 'extensions.chrome.com', 'microsoftedge.microsoft.com',
+    'support.apple.com', 'support.microsoft.com', 'help.ubuntu.com'
+  ];
+  
+  const blacklistedPathPatterns = [
+    // Technical and documentation patterns
+    /(namespace|schema|specification|reference|documentation|xml|html|css|javascript|api|rfc|ietf|draft|proposal|working-group)/i,
+    
+    // System and browser patterns
+    /(chrome|firefox|safari|edge|browser|extension|addon|plugin|update|download|install)/i,
+    
+    // Development and technical patterns
+    /(github|gitlab|stackoverflow|reddit|hackernews|forum|community|support|help|faq|docs|manual|guide|tutorial)/i,
+    
+    // Social and platform patterns
+    /(facebook|twitter|instagram|linkedin|youtube|tiktok|snapchat|pinterest|tumblr|social|share|like|comment)/i,
+    
+    // Infrastructure and CDN patterns
+    /(cdn|static|assets|images|js|css|fonts|icons|logos|banners|ads|tracking|analytics)/i,
+    
+    // Legal and policy pages
+    /(license|licenses|terms|privacy|policy|policies|legal|disclaimer|copyright|trademark|patent)/i,
+    
+    // Administrative and utility pages
+    /(about|contact|help|support|faq|feedback|report|bug|issue|status|maintenance|sitemap|robots)/i,
+    
+    // User account and authentication
+    /(login|logout|signin|signout|register|signup|account|profile|settings|preferences|dashboard|admin)/i
+  ];
+  
+  // Helper function to check if a URL is blacklisted
+  const isUrlBlacklisted = (host, path) => {
+    // Check if host is blacklisted
+    const isHostBlacklisted = blacklistedHosts.some(blacklisted => 
+      host.includes(blacklisted) || host.endsWith('.' + blacklisted)
+    );
+    
+    if (isHostBlacklisted) {
+      console.log('[GNS] URL blacklisted by host:', host);
+      return true;
+    }
+    
+    // Check if path contains blacklisted patterns
+    const hasBlacklistedPath = blacklistedPathPatterns.some(pattern => pattern.test(path));
+    if (hasBlacklistedPath) {
+      console.log('[GNS] URL blacklisted by path pattern:', path);
+      return true;
+    }
+    
+    return false;
+  };
+  
+  // Collect all absolute hrefs with more comprehensive patterns
   const hrefs = [];
+  
+  // Standard href attributes
   const reHref = /href="(https?:\/\/[^"]+)"/gi;
   let m;
   while ((m = reHref.exec(html)) !== null) {
     const href = decodeHtml(m[1]);
     if (href) hrefs.push(href);
   }
-  // Also consider data-url attributes as fallbacks
-  const reData = /data-url="(https?:\/\/[^"]+)"/gi;
-  while ((m = reData.exec(html)) !== null) {
+  
+  // Data attributes that might contain URLs
+  const reDataUrl = /data-url="(https?:\/\/[^"]+)"/gi;
+  while ((m = reDataUrl.exec(html)) !== null) {
     const href = decodeHtml(m[1]);
     if (href) hrefs.push(href);
   }
-  // Return the first href that looks like an article URL
-  for (const h of hrefs) {
-    if (isLikelyArticleUrl(h)) return h;
+  
+  const reDataHref = /data-href="(https?:\/\/[^"]+)"/gi;
+  while ((m = reDataHref.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href) hrefs.push(href);
   }
+  
+  const reDataLink = /data-link="(https?:\/\/[^"]+)"/gi;
+  while ((m = reDataLink.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href) hrefs.push(href);
+  }
+  
+  // JavaScript variables that might contain URLs
+  const reJsUrl = /['"`](https?:\/\/[^'"`]+)['"`]/gi;
+  while ((m = reJsUrl.exec(html)) !== null) {
+    const href = decodeHtml(m[0].slice(1, -1)); // Remove quotes
+    if (href && href.startsWith('http')) hrefs.push(href);
+  }
+  
+  // Look for any URLs in the HTML content (more aggressive)
+  const reAnyUrl = /https?:\/\/[^\s"'<>]+/gi;
+  while ((m = reAnyUrl.exec(html)) !== null) {
+    const href = decodeHtml(m[0]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Google News specific patterns - look for URLs in JavaScript data structures
+  const reJsData = /"url":\s*"(https?:\/\/[^"]+)"/gi;
+  while ((m = reJsData.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  const reJsHref = /"href":\s*"(https?:\/\/[^"]+)"/gi;
+  while ((m = reJsHref.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  const reJsLink = /"link":\s*"(https?:\/\/[^"]+)"/gi;
+  while ((m = reJsLink.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News specific data attributes
+  const reGNewsData = /data-url="([^"]*)"[^>]*data-source="([^"]*)"/gi;
+  while ((m = reGNewsData.exec(html)) !== null) {
+    const url = m[1];
+    const source = m[2];
+    if (url && !url.startsWith('http') && source && source !== 'news.google.com') {
+      // This might be a relative URL that needs to be resolved
+      const fullUrl = `https://${source}${url.startsWith('/') ? url : '/' + url}`;
+      if (!hrefs.includes(fullUrl)) hrefs.push(fullUrl);
+    }
+  }
+  
+  // Look for URLs in Google News article metadata
+  const reGNewsMeta = /data-n-tid="[^"]*"[^>]*data-url="(https?:\/\/[^"]+)"/gi;
+  while ((m = reGNewsMeta.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News JavaScript data structures
+  const reGNewsJsData = /window\.WIZ_global_data\s*=\s*({[^}]+})/gi;
+  while ((m = reGNewsJsData.exec(html)) !== null) {
+    try {
+      const jsonStr = m[1];
+      // Look for URLs in the JSON-like structure
+      const urlMatches = jsonStr.match(/"([^"]*\/[^"]*\.com[^"]*)"/g);
+      if (urlMatches) {
+        for (const match of urlMatches) {
+          const url = match.replace(/"/g, '');
+          if (url && url.includes('http') && !hrefs.includes(url)) {
+            hrefs.push(url);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore JSON parsing errors
+    }
+  }
+  
+  // Look for URLs in Google News specific meta tags
+  const reGNewsMetaUrl = /<meta[^>]*name="[^"]*url[^"]*"[^>]*content="([^"]+)"/gi;
+  while ((m = reGNewsMetaUrl.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && href.startsWith('http') && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News specific link tags
+  const reGNewsLinkUrl = /<link[^>]*rel="[^"]*canonical[^"]*"[^>]*href="([^"]+)"/gi;
+  while ((m = reGNewsLinkUrl.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && href.startsWith('http') && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News specific script tags with data
+  const reGNewsScriptData = /<script[^>]*type="[^"]*application\/ld\+json[^"]*"[^>]*>([^<]+)<\/script>/gi;
+  while ((m = reGNewsScriptData.exec(html)) !== null) {
+    try {
+      const jsonStr = m[1];
+      // Look for URLs in JSON-LD structured data
+      const urlMatches = jsonStr.match(/"url":\s*"([^"]+)"/gi);
+      if (urlMatches) {
+        for (const match of urlMatches) {
+          const url = match.replace(/"url":\s*"/i, '').replace(/"/g, '');
+          if (url && url.startsWith('http') && !hrefs.includes(url)) {
+            hrefs.push(url);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore JSON parsing errors
+    }
+  }
+  
+  // Look for URLs in Google News specific data attributes that might contain external links
+  const reGNewsExternalLink = /data-external-url="([^"]+)"/gi;
+  while ((m = reGNewsExternalLink.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && href.startsWith('http') && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News specific onclick handlers
+  const reGNewsOnclick = /onclick="[^"]*window\.open\(['"`]([^'"`]+)['"`]/gi;
+  while ((m = reGNewsOnclick.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && href.startsWith('http') && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in Google News specific href attributes with external patterns
+  const reGNewsExternalHref = /href="([^"]*)"[^>]*target="_blank"/gi;
+  while ((m = reGNewsExternalHref.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && href.startsWith('http') && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs embedded in JavaScript variables and data structures
+  const reJsVars = /(?:var|let|const)\s+\w+\s*=\s*["'`](https?:\/\/[^"'`]+)["'`]/gi;
+  while ((m = reJsVars.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in JavaScript object properties
+  const reJsProps = /"url":\s*["'`](https?:\/\/[^"'`]+)["'`]/gi;
+  while ((m = reJsProps.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in JavaScript function calls
+  const reJsFuncCalls = /(?:window\.open|location\.href|fetch|XMLHttpRequest)\s*\(\s*["'`](https?:\/\/[^"'`]+)["'`]/gi;
+  while ((m = reJsFuncCalls.exec(html)) !== null) {
+    const href = decodeHtml(m[1]);
+    if (href && !hrefs.includes(href)) hrefs.push(href);
+  }
+  
+  // Look for URLs in the specific JavaScript data we saw in logs
+  const reWizData = /window\.WIZ_global_data\s*=\s*({[\s\S]*?});/gi;
+  while ((m = reWizData.exec(html)) !== null) {
+    try {
+      const jsonStr = m[1];
+      // Look for any URLs in the WIZ data
+      const urlMatches = jsonStr.match(/(https?:\/\/[^\s"',}]+)/g);
+      if (urlMatches) {
+        for (const match of urlMatches) {
+          const url = match.trim();
+          if (url && url.includes('http') && !hrefs.includes(url)) {
+            hrefs.push(url);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore JSON parsing errors
+    }
+  }
+  
+  // Look for URLs that might be base64 encoded or in different formats
+  const reEncodedUrls = /(?:url|href|link|source)\s*[:=]\s*["'`]?([a-zA-Z0-9+/=]{20,})["'`]?/gi;
+  while ((m = reEncodedUrls.exec(html)) !== null) {
+    try {
+      const encoded = m[1];
+      // Try to decode base64
+      const decoded = atob(encoded);
+      if (decoded && decoded.includes('http')) {
+        const urlMatches = decoded.match(/(https?:\/\/[^\s"',}]+)/g);
+        if (urlMatches) {
+          for (const url of urlMatches) {
+            if (!hrefs.includes(url)) hrefs.push(url);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore base64 decoding errors
+    }
+  }
+  
+  // Look for URLs in data attributes that might contain encoded data
+  const reDataUrls = /data-(?:url|href|link|source)="([^"]+)"/gi;
+  while ((m = reDataUrls.exec(html)) !== null) {
+    const value = m[1];
+    if (value && value.includes('http')) {
+      if (!hrefs.includes(value)) hrefs.push(value);
+    } else if (value && value.length > 20) {
+      // Try to decode if it looks like encoded data
+      try {
+        const decoded = decodeURIComponent(value);
+        if (decoded && decoded.includes('http')) {
+          const urlMatches = decoded.match(/(https?:\/\/[^\s"',}]+)/g);
+          if (urlMatches) {
+            for (const url of urlMatches) {
+              if (!hrefs.includes(url)) hrefs.push(url);
+            }
+          }
+        }
+      } catch (e) {
+        // ignore decoding errors
+      }
+    }
+  }
+  
+  // Look for URLs in JavaScript variables that might be concatenated or constructed
+  const reJsConstructedUrls = /(?:url|href|link)\s*[:=]\s*["'`]([^"'`]*)\s*\+\s*["'`]([^"'`]+)["'`]/gi;
+  while ((m = reJsConstructedUrls.exec(html)) !== null) {
+    const part1 = m[1];
+    const part2 = m[2];
+    if (part1 && part2) {
+      const constructedUrl = part1 + part2;
+      if (constructedUrl.includes('http') && !hrefs.includes(constructedUrl)) {
+        hrefs.push(constructedUrl);
+      }
+    }
+  }
+  
+  // Look for URLs in Google News specific data structures that might contain external links
+  const reGNewsExternalData = /(?:external|source|publisher|original)\s*[:=]\s*["'`]([^"'`]+)["'`]/gi;
+  while ((m = reGNewsExternalData.exec(html)) !== null) {
+    const value = m[1];
+    if (value && value.includes('http') && !hrefs.includes(value)) {
+      hrefs.push(value);
+    }
+  }
+  
+  // Look for URLs in Google News specific JavaScript patterns
+  const reGNewsJsPatterns = [
+    /window\.(?:GNS|News|Article)\.(?:url|link|source)\s*=\s*["'`]([^"'`]+)["'`]/gi,
+    /(?:GNS|News|Article)\.(?:url|link|source)\s*=\s*["'`]([^"'`]+)["'`]/gi,
+    /(?:url|link|source)\s*[:=]\s*["'`]([^"'`]*\.(?:com|org|net|co|io)[^"'`]*)["'`]/gi
+  ];
+  
+  for (const pattern of reGNewsJsPatterns) {
+    while ((m = pattern.exec(html)) !== null) {
+      const value = m[1];
+      if (value && value.includes('http') && !hrefs.includes(value)) {
+        hrefs.push(value);
+      }
+    }
+  }
+  
+  // Look for any text that contains domain patterns that might be URLs
+  const reDomainPatterns = /(?:https?:\/\/)?([a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]\.(?:com|org|net|co|io|dev|news|media|press|journal|times|post|tribune|herald|gazette|chronicle|observer|review|weekly|daily|magazine|blog|site|web|online|digital))/gi;
+  while ((m = reDomainPatterns.exec(html)) !== null) {
+    const domain = m[1];
+    if (domain && !domain.includes('google.com') && !domain.includes('gstatic.com') && 
+        !domain.includes('googleusercontent.com') && !domain.includes('cdn.ampproject.org')) {
+      // Try to construct a full URL
+      const potentialUrl = `https://${domain}`;
+      if (!hrefs.includes(potentialUrl)) {
+        hrefs.push(potentialUrl);
+      }
+    }
+  }
+  
+  // Look for any text that looks like it might be a URL fragment
+  const reUrlFragments = /(?:url|href|link|source|redirect|target)\s*[:=]\s*["'`]?([^"'`\s,}]+(?:\.com|\.org|\.net|\.co|\.io)[^"'`\s,}]*)/gi;
+  while ((m = reUrlFragments.exec(html)) !== null) {
+    const fragment = m[1];
+    if (fragment && fragment.includes('.') && !hrefs.includes(fragment)) {
+      // If it doesn't start with http, try to add it
+      const fullUrl = fragment.startsWith('http') ? fragment : `https://${fragment}`;
+      if (!hrefs.includes(fullUrl)) {
+        hrefs.push(fullUrl);
+      }
+    }
+  }
+  
+  // Look for any text that contains common news/publisher domains
+  const commonNewsDomains = [
+    'screenrant.com', 'yahoo.com', 'cnn.com', 'bbc.com', 'reuters.com', 'ap.org',
+    'npr.org', 'nytimes.com', 'washingtonpost.com', 'wsj.com', 'bloomberg.com',
+    'forbes.com', 'techcrunch.com', 'theverge.com', 'engadget.com', 'ars-technica.com',
+    'polygon.com', 'ign.com', 'gamespot.com', 'kotaku.com', 'destructoid.com'
+  ];
+  
+  for (const domain of commonNewsDomains) {
+    const reDomain = new RegExp(`(https?://[^"'\s,}]*${domain.replace(/\./g, '\\.')}[^"'\s,}]*?)`, 'gi');
+    while ((m = reDomain.exec(html)) !== null) {
+      const url = m[1];
+      if (url && !hrefs.includes(url)) {
+        hrefs.push(url);
+      }
+    }
+  }
+  
+  console.log('[GNS] Found potential URLs:', hrefs.length);
+  
+  // Debug: Log some of the URLs we found
+  if (hrefs.length > 0) {
+    console.log('[GNS] Sample URLs found:', hrefs.slice(0, 10));
+    
+    // Also log any non-Google domains we found
+    const nonGoogleDomains = new Set();
+    for (const url of hrefs) {
+      try {
+        const urlObj = new URL(url);
+        const host = urlObj.hostname;
+        if (host && !host.includes('google.com') && !host.includes('gstatic.com') && 
+            !host.includes('googleusercontent.com') && !host.includes('cdn.ampproject.org')) {
+          nonGoogleDomains.add(host);
+        }
+      } catch (e) {
+        // ignore malformed URLs
+      }
+    }
+    if (nonGoogleDomains.size > 0) {
+      console.log('[GNS] Non-Google domains found:', Array.from(nonGoogleDomains));
+    }
+    
+    // Debug: Show URLs found in Google News specific patterns
+    console.log('[GNS] All URLs found for debugging:');
+    hrefs.forEach((url, index) => {
+      try {
+        const urlObj = new URL(url);
+        const host = urlObj.hostname;
+        const path = urlObj.pathname;
+        console.log(`[GNS] URL ${index + 1}: ${url} (host: ${host}, path: ${path})`);
+      } catch (e) {
+        console.log(`[GNS] URL ${index + 1}: ${url} (malformed)`);
+      }
+    });
+  }
+  
+  // First pass: look for URLs that are clearly external articles
+  for (const h of hrefs) {
+    try {
+      const url = new URL(h);
+      const host = url.hostname || '';
+      const path = url.pathname || '';
+      
+      // Skip Google domains
+      if (host.includes('google.com') || host.includes('gstatic.com') || 
+          host.includes('googleusercontent.com') || host.includes('cdn.ampproject.org')) {
+        continue;
+      }
+      
+      // Check if URL is blacklisted
+      if (isUrlBlacklisted(host, path)) {
+        continue;
+      }
+      
+      // Look for common article patterns
+      const articlePatterns = [
+        /\/\d{4}\/\d{2}\/\d{2}\//, // Date patterns like /2025/08/14/
+        /\/article\//, // /article/ in path
+        /\/story\//, // /story/ in path
+        /\/news\//, // /news/ in path
+        /\/post\//, // /post/ in path
+        /\/blog\//, // /blog/ in path
+        /\/[a-z]{2,}\/\d{4}\//, // Short word followed by year
+        /\/[a-z]{2,}\/[a-z]{2,}\//, // Two or more word segments
+        /\/articles\//, // /articles/ in path
+        /\/entertainment\//, // /entertainment/ in path
+        /\/tech\//, // /tech/ in path
+        /\/sports\//, // /sports/ in path
+        /\/politics\//, // /politics/ in path
+        /\/business\//, // /business/ in path
+        /\/world\//, // /world/ in path
+        /\/local\//, // /local/ in path
+        /\/opinion\//, // /opinion/ in path
+        /\/lifestyle\//, // /lifestyle/ in path
+        /\/health\//, // /health/ in path
+        /\/science\//, // /science/ in path
+      ];
+      
+      // If any article pattern matches, it's likely an article
+      for (const pattern of articlePatterns) {
+        if (pattern.test(path)) {
+          console.log('[GNS] Found likely article URL with pattern:', h, 'pattern:', pattern);
+          return h;
+        }
+      }
+      
+      // Also check for URLs with substantial path content, but be more selective
+      if (path.length > 15 && /[a-zA-Z]/.test(path)) {
+        console.log('[GNS] Found potential article URL with substantial path:', h, 'path length:', path.length);
+        return h;
+      }
+      
+    } catch (e) {
+      // ignore malformed URLs
+    }
+  }
+  
+  // Second pass: look for any non-Google URLs, even if they don't look like articles
+  // but be more selective about what we consider an article
+  console.log('[GNS] Starting fallback URL search...');
+  for (const h of hrefs) {
+    try {
+      const url = new URL(h);
+      const host = url.hostname || '';
+      const path = url.pathname || '';
+      
+      console.log('[GNS] Checking fallback URL:', h, 'host:', host, 'path:', path);
+      
+      // Skip Google domains
+      if (host.includes('google.com') || host.includes('gstatic.com') || 
+          host.includes('googleusercontent.com') || host.includes('cdn.ampproject.org')) {
+        console.log('[GNS] Skipping Google domain in fallback:', h);
+        continue;
+      }
+      
+      // Check if URL is blacklisted using the same helper function
+      if (isUrlBlacklisted(host, path)) {
+        console.log('[GNS] Skipping blacklisted URL in fallback:', h);
+        continue;
+      }
+      
+      // Look for any external domain that could potentially contain articles
+      if (host && host !== 'news.google.com') {
+        // Additional checks to ensure this looks like a news/publisher site
+        const isLikelyNewsSite = 
+          // Common news/publisher domain patterns
+          /(news|media|press|journal|times|post|tribune|herald|gazette|chronicle|observer|review|weekly|daily|magazine|blog|site|web|online|digital|com|org|net|co|io|dev)/i.test(host) ||
+          // Has substantial path content
+          (path.length > 10 && /[a-zA-Z]/.test(path)) ||
+          // Contains common news-related path segments
+          /(article|story|post|blog|news|content|page|view|read)/i.test(path);
+        
+        if (isLikelyNewsSite) {
+          console.log('[GNS] Found likely external article URL:', h, 'host:', host, 'path:', path);
+          return h;
+        } else {
+          console.log('[GNS] URL doesn\'t look like a news site:', h);
+        }
+      }
+    } catch (e) {
+      console.log('[GNS] Error processing fallback URL:', h, e);
+      // ignore malformed URLs
+    }
+  }
+  
+  // Third pass: if we still haven't found anything, look for ANY external domain
+  // that's not Google and not blacklisted
+  console.log('[GNS] Starting final fallback search for any external domain...');
+  for (const h of hrefs) {
+    try {
+      const url = new URL(h);
+      const host = url.hostname || '';
+      const path = url.pathname || '';
+      
+      // Skip Google domains
+      if (host.includes('google.com') || host.includes('gstatic.com') || 
+          host.includes('googleusercontent.com') || host.includes('cdn.ampproject.org')) {
+        continue;
+      }
+      
+      // Check if URL is blacklisted
+      if (isUrlBlacklisted(host, path)) {
+        continue;
+      }
+      
+      // If we find any external domain that passes our filters, use it
+      if (host && host !== 'news.google.com') {
+        console.log('[GNS] Found final fallback external URL:', h, 'host:', host);
+        return h;
+      }
+    } catch (e) {
+      // ignore malformed URLs
+    }
+  }
+  
+  console.log('[GNS] No external URLs found');
   return '';
 }
 
@@ -298,9 +1009,31 @@ function isLikelyArticleUrl(href) {
     const u = new URL(href);
     if (isDisallowedHost(u.hostname)) return false;
     const path = u.pathname || '';
-    if (/\.(js|css|png|jpe?g|gif|webp|svg|ico|json|xml)(\?|$)/i.test(path)) return false;
-    // Require some path depth and alphanumeric content
-    return path.length > 10 && /[a-zA-Z]/.test(path);
+    
+    // Exclude common asset extensions
+    if (/\.(js|css|png|jpe?g|gif|webp|svg|ico|json|xml|woff2?|ttf|eot)(\?|$)/i.test(path)) return false;
+    
+    // Look for common article patterns
+    const articlePatterns = [
+      /\/\d{4}\/\d{2}\/\d{2}\//, // Date patterns like /2025/08/14/
+      /\/article\//, // /article/ in path
+      /\/story\//, // /story/ in path
+      /\/news\//, // /news/ in path
+      /\/post\//, // /post/ in path
+      /\/blog\//, // /blog/ in path
+      /\/[a-z]{2,}\/\d{4}\//, // Short word followed by year
+      /\/[a-z]{2,}\/[a-z]{2,}\//, // Two or more word segments
+    ];
+    
+    // If any article pattern matches, it's likely an article
+    for (const pattern of articlePatterns) {
+      if (pattern.test(path)) {
+        return true;
+      }
+    }
+    
+    // Require some path depth and alphanumeric content, but be less restrictive
+    return path.length > 5 && /[a-zA-Z]/.test(path);
   } catch {
     return false;
   }
@@ -523,13 +1256,13 @@ async function summarizeWithOpenAIResponses(system, user, settings) {
 
       console.log('[GNS] Sending request to OpenAI (responses):', { ...body, input: '[messages elided]' });
       const res = await fetch('https://api.openai.com/v1/responses', {
-        method: 'POST',
-        headers: {
+    method: 'POST',
+    headers: {
           'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
       console.log('[GNS] OpenAI response status (responses):', res.status);
 
       if (res.ok) {
@@ -578,9 +1311,9 @@ async function summarizeWithOpenAIResponses(system, user, settings) {
             break; // break inner loop; go to next cap
           }
           console.error('[GNS] No summary returned by OpenAI (responses):', data);
-          throw new Error('No summary returned by OpenAI');
-        }
-        return sanitizeOneLine(content);
+    throw new Error('No summary returned by OpenAI');
+  }
+  return sanitizeOneLine(content);
       } else {
         const errText = await safeText(res);
         console.error('[GNS] OpenAI error response (responses):', errText);
@@ -608,7 +1341,7 @@ function validateHeaderByteString(name, value) {
     const code = value.charCodeAt(i);
     if (code > 127) {
       // Do not echo the value; provide a clear, actionable error.
-      throw new Error(`Header "${name}" contains a non-ASCII character (e.g., “smart quotes” or an ellipsis). Re-copy your API key exactly from OpenAI (no …) and paste plain text.`);
+      throw new Error(`Header "${name}" contains a non-ASCII character (e.g., "smart quotes" or an ellipsis). Re-copy your API key exactly from OpenAI (no …) and paste plain text.`);
     }
   }
   // Heuristic guard: extremely long keys usually indicate copying a truncated UI string with an ellipsis.
@@ -633,6 +1366,216 @@ function sanitizeOneLine(s) {
   const one = s.replace(/\s+/g, ' ').trim();
   // Soft cap ~200 chars
   return one.length > 200 ? one.slice(0, 200).trim() + '…' : one;
+}
+
+/**
+ * Try to extract article content directly from the Google News page
+ * This is a fallback when redirect detection fails or leads to non-article pages
+ */
+function extractArticleContentFromGoogleNews(html) {
+  if (!html || typeof html !== 'string') return '';
+  
+  console.log('[GNS] Attempting to extract article content from Google News page');
+  
+  try {
+    // Use DOMParser if available to extract content more intelligently
+    if (typeof DOMParser !== 'undefined') {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      if (!doc) return '';
+      
+      // Look for common Google News content selectors
+      const contentSelectors = [
+        '[data-n-tid="29"]', // Google News article title
+        '.gPFEn', // Google News article title class
+        '.UOVeFe', // Google News article metadata
+        '.JfXTR', // Google News article content area
+        'article', // Article elements
+        '[role="article"]', // Article role elements
+        '.hLNLFf', // Google News article container
+        '.MCAGUe', // Google News article wrapper
+        '.vr1PYe', // Google News source name
+        '.bInasb', // Google News byline
+        '.hvbAAd', // Google News timestamp
+        '.CUjhod' // Google News category
+      ];
+      
+      let extractedText = '';
+      for (const selector of contentSelectors) {
+        const elements = doc.querySelectorAll(selector);
+        console.log(`[GNS] Found ${elements.length} elements with selector: ${selector}`);
+        for (const el of elements) {
+          const text = el.textContent || '';
+          if (text && text.length > 20 && !text.includes('Google News') && !text.includes('Skip to main')) {
+            console.log(`[GNS] Extracted text from ${selector}:`, text.substring(0, 100));
+            extractedText += text + ' ';
+          }
+        }
+      }
+      
+      if (extractedText.trim().length > 200) {
+        console.log('[GNS] Successfully extracted article content, length:', extractedText.trim().length);
+        return extractedText.trim();
+      } else {
+        console.log('[GNS] Extracted content too short:', extractedText.trim().length);
+      }
+    }
+    
+    // Fallback: use regex to find content blocks with more patterns
+    console.log('[GNS] Trying regex fallback extraction');
+    const contentPatterns = [
+      /<[^>]*class="[^"]*(?:gPFEn|UOVeFe|JfXTR|hLNLFf|MCAGUe|vr1PYe|bInasb|hvbAAd|CUjhod)[^"]*"[^>]*>([^<]+)<\/[^>]*>/gi,
+      /<[^>]*data-n-tid="[^"]*"[^>]*>([^<]+)<\/[^>]*>/gi,
+      /<[^>]*jslog="[^"]*"[^>]*>([^<]+)<\/[^>]*>/gi
+    ];
+    
+    for (const pattern of contentPatterns) {
+      const contentBlocks = html.match(pattern);
+      if (contentBlocks) {
+        console.log(`[GNS] Found ${contentBlocks.length} content blocks with pattern`);
+        let extracted = '';
+        for (const block of contentBlocks) {
+          const textMatch = block.match(/>([^<]+)</);
+          if (textMatch && textMatch[1]) {
+            const text = textMatch[1].trim();
+            if (text.length > 20 && !text.includes('Google News') && !text.includes('Skip to main')) {
+              console.log(`[GNS] Extracted text from regex:`, text.substring(0, 100));
+              extracted += text + ' ';
+            }
+          }
+        }
+        if (extracted.trim().length > 200) {
+          console.log('[GNS] Successfully extracted content with regex, length:', extracted.trim().length);
+          return extracted.trim();
+        }
+      }
+    }
+    
+    // Last resort: try to find any meaningful text content
+    console.log('[GNS] Trying last resort text extraction');
+    const textMatches = html.match(/>([^<]{50,})</g);
+    if (textMatches) {
+      let extracted = '';
+      for (const match of textMatches) {
+        const text = match.replace(/^>|<$/g, '').trim();
+        if (text.length > 50 && !text.includes('Google News') && !text.includes('Skip to main') && !text.includes('Advertisement')) {
+          console.log(`[GNS] Last resort text:`, text.substring(0, 100));
+          extracted += text + ' ';
+        }
+      }
+      if (extracted.trim().length > 200) {
+        console.log('[GNS] Successfully extracted content with last resort, length:', extracted.trim().length);
+        return extracted.trim();
+      }
+    }
+    
+    console.log('[GNS] Failed to extract meaningful content from Google News page');
+    return '';
+  } catch (e) {
+    console.log('[GNS] Error extracting content from Google News page:', e);
+    return '';
+  }
+}
+
+async function extractTextFromRegularUrl(url) {
+  try {
+    const html = await fetchHtml(url);
+    return await tryParse(html);
+  } catch (error) {
+    console.error('[GNS] Error extracting from regular URL:', error);
+    throw error;
+  }
+}
+
+async function tryParse(html) {
+  try {
+    // Use regex-based parsing since DOMParser is not available in background scripts
+    
+    // Extract title
+    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+    
+    // Extract meta description
+    const metaDescMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["'][^>]*>/i);
+    const metaDesc = metaDescMatch ? metaDescMatch[1].trim() : '';
+    
+    // Extract Open Graph description
+    const ogDescMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["'][^>]*>/i);
+    const ogDesc = ogDescMatch ? ogDescMatch[1].trim() : '';
+    
+    // Try to extract main content using regex patterns
+    let mainContent = '';
+    
+    // Look for common content selectors
+    const contentSelectors = [
+      /<main[^>]*>([\s\S]*?)<\/main>/i,
+      /<article[^>]*>([\s\S]*?)<\/article>/i,
+      /<div[^>]*class=["'][^"']*content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class=["'][^"']*post-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class=["'][^"']*entry-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class=["'][^"']*article-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+      /<div[^>]*class=["'][^"']*story-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i
+    ];
+    
+    for (const selector of contentSelectors) {
+      const match = html.match(selector);
+      if (match && match[1]) {
+        // Strip HTML tags and clean up
+        const text = match[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (text.length > 200) {
+          mainContent = text;
+          break;
+        }
+      }
+    }
+    
+    // Extract body content as fallback
+    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    const bodyContent = bodyMatch ? bodyMatch[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    
+    // Combine all available content, prioritizing main content
+    let combinedContent = '';
+    if (mainContent && mainContent.length > 200) {
+      combinedContent = mainContent;
+    } else if (metaDesc && metaDesc.length > 100) {
+      combinedContent = metaDesc;
+    } else if (ogDesc && ogDesc.length > 100) {
+      combinedContent = ogDesc;
+    } else if (bodyContent && bodyContent.length > 200) {
+      combinedContent = bodyContent;
+    }
+    
+    // Clean up the content
+    if (combinedContent) {
+      combinedContent = combinedContent
+        .replace(/\s+/g, ' ')
+        .replace(/\n+/g, ' ')
+        .trim();
+      
+      // If we have a title, prepend it
+      if (title && !combinedContent.includes(title)) {
+        combinedContent = title + '. ' + combinedContent;
+      }
+      
+      return combinedContent;
+    }
+    
+    // Fallback to title + description
+    if (title || metaDesc || ogDesc) {
+      return [title, metaDesc, ogDesc].filter(Boolean).join('. ');
+    }
+    
+    // Last resort: extract any meaningful text from the HTML
+    const textContent = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (textContent.length > 100) {
+      return textContent.substring(0, 2000); // Limit length
+    }
+    
+    return '';
+  } catch (e) {
+    console.log('[GNS] Error parsing HTML:', e);
+    return '';
+  }
 }
 
 // Open options page when extension icon is clicked (MV3 and MV2 support)
