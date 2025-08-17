@@ -127,16 +127,37 @@ function injectUI(card, titleAnchor) {
   btn.type = 'button';
   btn.className = 'gns-btn';
   btn.title = 'Summarize this article';
-  btn.textContent = '🧠';
+  btn.textContent = ''; // Start with empty text, parrot shows on hover
+  btn.dataset.state = 'summarize'; // Initialize state
 
   const bubble = document.createElement('div');
   bubble.className = 'gns-bubble';
   bubble.hidden = true;
+  
+  // Ensure bubble doesn't interfere with text selection
+  bubble.style.pointerEvents = 'auto';
+  bubble.style.userSelect = 'text';
+  bubble.style.webkitUserSelect = 'text';
+  bubble.style.mozUserSelect = 'text';
+  bubble.style.msUserSelect = 'text';
+  
+  // Remove any event listeners that might interfere with text selection
+  bubble.addEventListener('mousedown', (e) => {
+    // Allow text selection in bubble - don't stop propagation
+    console.log('[GNS][CS] Bubble mousedown - allowing text selection');
+  });
+  bubble.addEventListener('click', (e) => {
+    // Allow clicks in bubble for text selection - don't stop propagation
+    console.log('[GNS][CS] Bubble click - allowing text selection');
+  });
 
   // Insert UI: append to card (not inside link)
   card.appendChild(wrap);
   wrap.appendChild(btn);
   wrap.appendChild(bubble);
+  
+  // Don't append close button initially - only when bubble has content
+  // bubble.appendChild(bubbleCloseBtn); // Remove this line
 
   // Make the summarize button reliably clickable
   wrap.style.pointerEvents = 'auto';
@@ -152,18 +173,151 @@ function injectUI(card, titleAnchor) {
   shieldClicks(wrap);
   shieldClicks(btn);
 
+  // Function to update button state based on bubble content
+  const updateButtonState = () => {
+    const hasContent = bubble.textContent && bubble.textContent.trim() && !bubble.hidden;
+    console.log('[GNS][CS] updateButtonState called:', {
+      hasContent: hasContent,
+      bubbleText: bubble.textContent?.substring(0, 50),
+      bubbleHidden: bubble.hidden
+    });
+    
+    if (hasContent) {
+      btn.textContent = '✕';
+      btn.title = 'Close summary';
+      btn.classList.add('gns-close');
+      btn.dataset.state = 'close'; // Add data attribute for more reliable state tracking
+      console.log('[GNS][CS] Button set to close state');
+    } else {
+      btn.textContent = ''; // Hide emoji by default
+      btn.title = 'Summarize this article';
+      btn.classList.remove('gns-close');
+      btn.dataset.state = 'summarize'; // Add data attribute for more reliable state tracking
+      console.log('[GNS][CS] Button set to summarize state');
+    }
+  };
+
+  // Helper function to close bubble and reset button state
+  const closeBubble = () => {
+    console.log('[GNS][CS] closeBubble called');
+    bubble.hidden = true;
+    bubble.innerHTML = ''; // Clear content
+    bubble.classList.remove('gns-error');
+    updateButtonState(); // This will reset the button state properly
+    console.log('[GNS][CS] Bubble closed and button reset');
+  };
+
+  // Show parrot emoji on hover or when active
+  const showParrot = () => {
+    console.log('[GNS][CS] showParrot called:', {
+      dataState: btn.dataset.state,
+      dataLoading: btn.dataset.loading
+    });
+    if (btn.dataset.state === 'summarize' && btn.dataset.loading !== '1') {
+      btn.textContent = '🦜';
+      console.log('[GNS][CS] Parrot shown');
+    }
+  };
+
+  const hideParrot = () => {
+    console.log('[GNS][CS] hideParrot called:', {
+      dataState: btn.dataset.state,
+      dataLoading: btn.dataset.loading
+    });
+    if (btn.dataset.state === 'summarize' && btn.dataset.loading !== '1') {
+      btn.textContent = '';
+      console.log('[GNS][CS] Parrot hidden');
+    }
+  };
+
+  // Add hover events to the card (entire article) instead of just the wrap
+  card.addEventListener('mouseenter', showParrot);
+  card.addEventListener('mouseleave', hideParrot);
+  
+  // Remove hover events from wrap since we moved them to card
+  // wrap.addEventListener('mouseenter', showParrot);
+  // wrap.addEventListener('mouseleave', hideParrot);
+
   // Some sites prevent "click" from firing; ensure we handle pointer/mouse/touch directly
+  let isProcessing = false; // Flag to prevent multiple simultaneous triggers
+  
   const trigger = async (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+    
+    // Prevent multiple simultaneous triggers
+    if (isProcessing) {
+      console.log('[GNS][CS] Already processing, ignoring click');
+      return;
+    }
+    
+    // CRITICAL: Check button state first before doing anything else
+    const isCloseState = btn.dataset.state === 'close';
+    const isLoading = btn.dataset.loading === '1';
+    const hasCloseClass = btn.classList.contains('gns-close');
+    const isXButton = btn.textContent === '✕';
+    
+    console.log('[GNS][CS] Button clicked!', {
+      buttonText: btn.textContent,
+      dataState: btn.dataset.state,
+      dataLoading: btn.dataset.loading,
+      hasCloseClass: hasCloseClass,
+      isCloseState: isCloseState,
+      isLoading: isLoading,
+      isProcessing: isProcessing,
+      isXButton: isXButton
+    });
+    
+    // If button is in close state OR has X text OR has close class, close the bubble and return early
+    if (isCloseState || isXButton || hasCloseClass) {
+      console.log('[GNS][CS] Close button clicked, closing bubble');
+      isProcessing = true;
+      try {
+        closeBubble();
+      } finally {
+        isProcessing = false;
+      }
+      return;
+    }
+    
+    // If button is loading, don't do anything
+    if (isLoading) {
+      console.log('[GNS][CS] Button is loading, ignoring click');
+      return;
+    }
+    
+    console.log('[GNS][CS] Summarize button clicked, starting API call');
+    isProcessing = true;
     try {
-      await onSummarizeClick({ card, titleAnchor, button: btn, bubble });
+      await onSummarizeClick({ card, titleAnchor, button: btn, bubble, updateButtonState, closeBubble });
     } catch (err) {
       // Surface any unexpected error in the bubble
-      bubble.textContent = (String(err && err.message ? err.message : err) || 'Error').replace(/\s+/g, ' ').trim();
+      bubble.innerHTML = ''; // Clear any existing content
+      
+      // Create and add close button to bubble
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'gns-bubble-close';
+      closeBtn.textContent = '✕';
+      closeBtn.title = 'Close summary';
+      closeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[GNS][CS] Bubble close button clicked');
+        closeBubble();
+      });
+      
+      const errorDiv = document.createElement('div');
+      errorDiv.textContent = (String(err && err.message ? err.message : err) || 'Error').replace(/\s+/g, ' ').trim();
+      errorDiv.style.paddingRight = '20px'; // Make room for close button
+      
+      bubble.appendChild(closeBtn);
+      bubble.appendChild(errorDiv);
       bubble.classList.add('gns-error');
       bubble.hidden = false;
+      updateButtonState(); // Update button state after error
+    } finally {
+      isProcessing = false;
     }
   };
 
@@ -181,22 +335,64 @@ function injectUI(card, titleAnchor) {
   btn.addEventListener('click', trigger, { capture: true });
 }
 
-async function onSummarizeClick({ card, titleAnchor, button, bubble }) {
+async function onSummarizeClick({ card, titleAnchor, button, bubble, updateButtonState, closeBubble }) {
+  console.log('[GNS][CS] onSummarizeClick called with button state:', {
+    dataState: button.dataset.state,
+    dataLoading: button.dataset.loading,
+    hasCloseClass: button.classList.contains('gns-close'),
+    buttonText: button.textContent
+  });
+  
+  // Triple-check button state to prevent API calls when in close state
+  if (button.dataset.state === 'close') {
+    console.log('[GNS][CS] Button is in close state, aborting API call');
+    return;
+  }
+  
+  if (button.classList.contains('gns-close')) {
+    console.log('[GNS][CS] Button has gns-close class, aborting API call');
+    return;
+  }
+  
+  if (button.textContent === '✕') {
+    console.log('[GNS][CS] Button text is X, aborting API call');
+    return;
+  }
+  
   if (button.dataset.loading === '1') return;
   button.dataset.loading = '1';
-  const prevText = button.textContent;
   button.textContent = '…'; // loading indicator
   // Show spinner only (hide bubble while loading)
   bubble.hidden = true;
-  bubble.textContent = '';
+  bubble.innerHTML = ''; // Clear any existing content
   try { console.debug('[GNS][CS] Summarize clicked'); } catch {}
 
   // Basic sanity check for messaging API
   if (!chrome?.runtime?.sendMessage) {
-    bubble.textContent = 'Extension messaging unavailable.';
+    bubble.innerHTML = ''; // Clear any existing content
+    
+    // Create and add close button to bubble
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'gns-bubble-close';
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'Close summary';
+    closeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[GNS][CS] Bubble close button clicked');
+      closeBubble();
+    });
+    
+    const errorDiv = document.createElement('div');
+    errorDiv.textContent = 'Extension messaging unavailable.';
+    errorDiv.style.paddingRight = '20px'; // Make room for close button
+    
+    bubble.appendChild(closeBtn);
+    bubble.appendChild(errorDiv);
     bubble.classList.add('gns-error');
+    bubble.hidden = false;
     button.dataset.loading = '0';
-    button.textContent = prevText;
+    updateButtonState(); // Use updateButtonState instead of setting text directly
     return;
   }
 
@@ -234,16 +430,62 @@ async function onSummarizeClick({ card, titleAnchor, button, bubble }) {
       throw new Error(resp?.error || 'Summarization failed.');
     }
 
-    bubble.textContent = resp.summary;
-    bubble.hidden = false;
+    // Only show bubble if we have content
+    if (resp.summary && resp.summary.trim()) {
+      // Clear bubble and add content
+      bubble.innerHTML = ''; // Clear including close button
+      
+      // Create and add close button to bubble
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'gns-bubble-close';
+      closeBtn.textContent = '✕';
+      closeBtn.title = 'Close summary';
+      closeBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[GNS][CS] Bubble close button clicked');
+        closeBubble();
+      });
+      
+      const contentDiv = document.createElement('div');
+      contentDiv.textContent = resp.summary;
+      contentDiv.style.paddingRight = '20px'; // Make room for close button
+      
+      bubble.appendChild(closeBtn);
+      bubble.appendChild(contentDiv);
+      bubble.hidden = false;
+    } else {
+      bubble.hidden = true;
+    }
     try { console.debug('[GNS][CS] Summary received'); } catch {}
   } catch (err) {
-    bubble.textContent = (String(err && err.message ? err.message : err) || 'Error').replace(/\s+/g, ' ').trim();
+    // Clear bubble and add error content
+    bubble.innerHTML = ''; // Clear including close button
+    
+    // Create and add close button to bubble
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'gns-bubble-close';
+    closeBtn.textContent = '✕';
+    closeBtn.title = 'Close summary';
+    closeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      console.log('[GNS][CS] Bubble close button clicked');
+      closeBubble();
+    });
+    
+    const errorDiv = document.createElement('div');
+    errorDiv.textContent = (String(err && err.message ? err.message : err) || 'Error').replace(/\s+/g, ' ').trim();
+    errorDiv.style.paddingRight = '20px'; // Make room for close button
+    
+    bubble.appendChild(closeBtn);
+    bubble.appendChild(errorDiv);
     bubble.classList.add('gns-error');
     bubble.hidden = false;
   } finally {
     button.dataset.loading = '0';
-    button.textContent = prevText;
+    // Don't reset textContent here - let updateButtonState handle it
+    updateButtonState(); // Update button state after loading completes
   }
 }
 

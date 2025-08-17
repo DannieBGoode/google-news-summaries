@@ -25,31 +25,45 @@
 }
 
 .gns-btn {
-  all: unset;
-  display: inline-flex;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid #dadce0;
+  background: white;
+  color: #5f6368;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  line-height: 1;
-  border-radius: 50%;
-  cursor: pointer;
-  user-select: none;
-  background: #e8f0fe;
-  color: #174ea6;
-  border: 1px solid #c3d4ff;
-  font-size: 14px;
-  box-shadow: 0 1px 1px rgba(0,0,0,0.08);
-  position: relative; /* for spinner */
+  z-index: 2147483647;
+  transition: all 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  margin-right: 8px; /* Add small margin to avoid overlap with "..." button */
+  opacity: 0; /* Hide by default */
 }
 
-.gns-btn:hover {
-  background: #dbe7ff;
-  border-color: #b3c7ff;
+.gns-card:hover .gns-btn {
+  opacity: 1; /* Show when hovering over the article */
 }
 
 .gns-btn:active {
   transform: translateY(0.5px);
+}
+
+.gns-btn.gns-close {
+  opacity: 1; /* Always show when in close state */
+  background: #f1f3f4; /* Neutral gray */
+  color: #5f6368;
+  border-color: #dadce0;
+}
+
+.gns-btn.gns-close:hover {
+  background: #e8eaed;
+  border-color: #c4c7c5;
 }
 
 .gns-btn[data-loading="1"] {
@@ -88,6 +102,38 @@
   white-space: normal;
   word-wrap: break-word;
   word-break: break-word;
+  position: relative; /* For positioning the close button */
+  z-index: 2147483648; /* Higher than button (2147483647) */
+}
+
+.gns-bubble[hidden] {
+  display: none !important;
+}
+
+.gns-bubble-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: none;
+  color: #5f6368;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2px;
+  transition: background-color 0.1s;
+}
+
+.gns-bubble-close:hover {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.gns-bubble-close:active {
+  background-color: rgba(0, 0, 0, 0.2);
 }
 
 .gns-bubble.gns-error {
